@@ -53,25 +53,36 @@ scene.add(cyan);
 // --- config ---
 // Model list is discovered at build time and injected via the canvas data
 // attribute — drop a new .glb into /public/models and it appears, no code edits.
-const MODEL_FILES: string[] = JSON.parse(canvas.dataset.models || "[]");
+// These four source GLBs have scene transforms that do not behave as portable
+// game objects. Keep the files for later replacement, but do not spawn them.
+const EXCLUDED_MODELS = new Set([
+	"goose", "pig", "shark", "cockroach",
+	// These imports have extreme or inconsistent transforms in the game field.
+	"cavalo_no_estilo_de_ps1", "eva_01_ps1", "pixelated_pig_horror",
+]);
+const MODEL_FILES: string[] = (JSON.parse(canvas.dataset.models || "[]") as string[])
+	.filter((name) => !EXCLUDED_MODELS.has(name));
 if (MODEL_FILES.length === 0) {
 	console.warn("No models found — add .glb files to /public/models");
 }
 
-const TARGET_SIZE = 3.8; // normalized max dimension of every model — bigger
-const COUNT = 14;
-const bounds = { x: 10, y: 5.6, z: 4.5 };
+const TARGET_SIZE = 2.35; // keep every object comfortably clickable in-frame
+const COUNT = 20;
+const bounds = { x: 9.2, y: 5.2, z: 3.2 };
 // hard slab the pieces are confined to, so nothing can rush the camera and
 // appear as a giant unclickable blob before vanishing behind it
-const Z_MIN = -7;
-const Z_MAX = 4; // camera sits at z=14, so pieces stay >=10 units away
-const MAX_SPEED = 13;
+const Z_MIN = -4.5;
+const Z_MAX = 1.5; // camera sits at z=14, so pieces stay >=12.5 units away
+const MAX_SPEED = 8.4;
 
-const FLEE_RADIUS = 5.6;
-const FLEE_ACCEL = 90;
+const FLEE_RADIUS = 3.8;
+const FLEE_ACCEL = 40;
 const HOME_K = 1.35;
-const WANDER = 3.6;
+const WANDER = 4.5;
 const PANIC_DURATION = 0.5;
+const TARGET_SCORE = 20;
+let score = 0;
+let gameComplete = false;
 
 const confettiColors = [
 	0xff5d8f, 0xffd23f, 0x3bd6c6, 0x6c8cff, 0xa06bff,
@@ -84,15 +95,21 @@ type Prototype = { name: string; holder: THREE.Group };
 
 function prepPrototype(gltf: { scene: THREE.Group }, name: string): Prototype {
 	const root = gltf.scene;
+	root.updateMatrixWorld(true);
 	const box = new THREE.Box3().setFromObject(root);
 	const size = box.getSize(new THREE.Vector3());
 	const center = box.getCenter(new THREE.Vector3());
 	const maxDim = Math.max(size.x, size.y, size.z) || 1;
 	const scale = TARGET_SIZE / maxDim;
 
-	root.position.sub(center); // recenter geometry on origin
+	// Keep the GLB's own transform intact. Several models have a non-identity
+	// scene root, so subtracting a world-space bounding-box centre from
+	// `root.position` moved their visible mesh away from its click group.
+	const centreOffset = new THREE.Group();
+	centreOffset.position.copy(center).multiplyScalar(-1);
+	centreOffset.add(root);
 	const holder = new THREE.Group();
-	holder.add(root);
+	holder.add(centreOffset);
 	holder.scale.setScalar(scale);
 	return { name, holder };
 }
@@ -117,6 +134,7 @@ function loadModel(name: string): Promise<Prototype | null> {
 type Piece = {
 	group: THREE.Group;
 	materials: THREE.Material[];
+	hitGeometry: THREE.BufferGeometry;
 	velocity: THREE.Vector3;
 	home: THREE.Vector3;
 	spin: THREE.Vector3;
@@ -143,11 +161,25 @@ function nextPrototype(): Prototype {
 	return protoBag.pop() as Prototype;
 }
 
+const HOME_SLOTS = [
+	// A full field on purpose: objects may cross the title window now.
+	[-5.1, 2.8], [-2.5, 2.8], [0, 2.8], [2.5, 2.8], [5.1, 2.8],
+	[-5.1, 0.9], [-2.5, 0.9], [0, 0.9], [2.5, 0.9], [5.1, 0.9],
+	[-5.1, -0.9], [-2.5, -0.9], [0, -0.9], [2.5, -0.9], [5.1, -0.9],
+	[-5.1, -2.7], [-2.5, -2.7], [0, -2.7], [2.5, -2.7], [5.1, -2.7],
+] as const;
+
 function randomHome() {
+	// Explicit slots make the game readable: no stack of models in the middle,
+	// no impossible hit targets, and the title window keeps a clear corner.
+	const openSlots = HOME_SLOTS.filter(([x, y]) =>
+		pieces.every((piece) => Math.hypot(piece.home.x - x, piece.home.y - y) > 1.7),
+	);
+	const [x, y] = openSlots[Math.floor(Math.random() * openSlots.length)] ?? HOME_SLOTS[0];
 	return new THREE.Vector3(
-		(Math.random() - 0.5) * bounds.x * 2,
-		(Math.random() - 0.5) * bounds.y * 2,
-		(Math.random() - 0.5) * bounds.z * 2 - 1.5,
+		x + (Math.random() - 0.5) * 0.35,
+		y + (Math.random() - 0.5) * 0.3,
+		-2.1 + Math.random() * 1.3,
 	);
 }
 
@@ -156,7 +188,7 @@ function spawnPiece(home = randomHome()) {
 	const proto = nextPrototype();
 	const group = proto.holder.clone(true);
 	// per-piece size variety so the field doesn't look uniform
-	const targetScale = group.scale.x * (0.7 + Math.random() * 0.7);
+	const targetScale = group.scale.x * (0.78 + Math.random() * 0.32);
 
 	const materials: THREE.Material[] = [];
 	group.traverse((o) => {
@@ -166,6 +198,8 @@ function spawnPiece(home = randomHome()) {
 			mat.transparent = false; // fully solid, never see-through
 			mat.opacity = 1;
 			mat.depthWrite = true;
+			mat.needsUpdate = true;
+			mesh.frustumCulled = false;
 			mesh.material = mat;
 			materials.push(mat);
 		}
@@ -178,10 +212,25 @@ function spawnPiece(home = randomHome()) {
 		Math.random() * Math.PI,
 	);
 	group.scale.setScalar(0.01); // pop-in
+	// Some of the hand-made GLBs render correctly but have geometry that their
+	// triangle raycast cannot hit. A transparent sphere gives every model the
+	// same generous, reliable click area without changing how it looks.
+	const hitMaterial = new THREE.MeshBasicMaterial({
+		transparent: true,
+		opacity: 0,
+		depthWrite: false,
+		side: THREE.DoubleSide,
+	});
+	const hitGeometry = new THREE.SphereGeometry((TARGET_SIZE * 1.15) / targetScale, 12, 8);
+	const hitTarget = new THREE.Mesh(hitGeometry, hitMaterial);
+	hitTarget.name = "click-target";
+	group.add(hitTarget);
+	materials.push(hitMaterial);
 
 	const piece: Piece = {
 		group,
 		materials,
+		hitGeometry,
 		velocity: new THREE.Vector3(),
 		home,
 		spin: new THREE.Vector3(
@@ -258,10 +307,19 @@ function explode(piece: Piece) {
 
 	scene.remove(piece.group);
 	for (const m of piece.materials) m.dispose();
+	piece.hitGeometry.dispose();
 	const idx = pieces.indexOf(piece);
 	if (idx !== -1) pieces.splice(idx, 1);
+	score += 1;
+	window.dispatchEvent(
+		new CustomEvent("trash:score", { detail: { score, target: TARGET_SCORE } }),
+	);
+	if (score >= TARGET_SCORE) {
+		gameComplete = true;
+		window.dispatchEvent(new CustomEvent("trash:complete"));
+	}
 	window.setTimeout(() => {
-		if (alive) spawnPiece();
+		if (alive && !gameComplete) spawnPiece();
 	}, 500 + Math.random() * 900);
 }
 
@@ -272,6 +330,12 @@ let hasPointer = false;
 const raycaster = new THREE.Raycaster();
 const cursorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const cursorWorld = new THREE.Vector3(999, 999, 0);
+const card = document.querySelector(".game-ui") as HTMLElement | null;
+let cardBounds = card?.getBoundingClientRect();
+
+function updateCardBounds() {
+	cardBounds = card?.getBoundingClientRect();
+}
 
 function onPointerMove(event: PointerEvent) {
 	pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -280,6 +344,7 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onPointerDown(event: PointerEvent) {
+	if (gameComplete) return;
 	// derive NDC from the event itself — a tap may not fire pointermove first
 	pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
 	pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -289,26 +354,32 @@ function onPointerDown(event: PointerEvent) {
 		pieces.map((p) => p.group),
 		true,
 	);
-	if (hits.length === 0) return;
-	let o: THREE.Object3D | null = hits[0].object;
-	while (o && !o.userData.piece) o = o.parent;
-	if (o) {
-		const piece = o.userData.piece as Piece;
-		if (piece.state !== "panic") {
-			piece.state = "panic";
-			piece.panicT = 0;
-			// launch a startled kick away from the cursor
-			const away = piece.group.position.clone().sub(cursorWorld);
-			away.z = 0;
-			piece.velocity.addScaledVector(away.normalize(), 12);
+	// Do not let an already-popping foreground model swallow every click behind
+	// it. This is what made the pig, shark, and cockroach appear unclickable.
+	let piece: Piece | undefined;
+	for (const hit of hits) {
+		let o: THREE.Object3D | null = hit.object;
+		while (o && !o.userData.piece) o = o.parent;
+		const candidate = o?.userData.piece as Piece | undefined;
+		if (candidate && candidate.state !== "panic") {
+			piece = candidate;
+			break;
 		}
 	}
+	if (!piece) return;
+	piece.state = "panic";
+	piece.panicT = 0;
+	// launch a startled kick away from the cursor
+	const away = piece.group.position.clone().sub(cursorWorld);
+	away.z = 0;
+	piece.velocity.addScaledVector(away.normalize(), 3.6);
 }
 
 function onResize() {
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
 	renderer.setSize(window.innerWidth, window.innerHeight);
+	updateCardBounds();
 }
 
 window.addEventListener("pointermove", onPointerMove);
@@ -319,6 +390,32 @@ window.addEventListener("resize", onResize);
 
 const clock = new THREE.Clock();
 const tmp = new THREE.Vector3();
+const screenPoint = new THREE.Vector3();
+
+function bounceOffCard(piece: Piece) {
+	if (!cardBounds) return;
+	screenPoint.copy(piece.group.position).project(camera);
+	const x = (screenPoint.x * 0.5 + 0.5) * window.innerWidth;
+	const y = (-screenPoint.y * 0.5 + 0.5) * window.innerHeight;
+	// Use a generous bumper because several low-poly models are much wider than
+	// their origin; they should reverse before their visible geometry reaches
+	// the title window.
+	const padding = 110;
+	if (
+		x < cardBounds.left - padding || x > cardBounds.right + padding ||
+		y < cardBounds.top - padding || y > cardBounds.bottom + padding
+	) return;
+
+	const distances = [
+		Math.abs(x - cardBounds.left), Math.abs(cardBounds.right - x),
+		Math.abs(y - cardBounds.top), Math.abs(cardBounds.bottom - y),
+	];
+	const side = distances.indexOf(Math.min(...distances));
+	if (side === 0) piece.velocity.x = -Math.max(Math.abs(piece.velocity.x), 2.8);
+	if (side === 1) piece.velocity.x = Math.max(Math.abs(piece.velocity.x), 2.8);
+	if (side === 2) piece.velocity.y = Math.max(Math.abs(piece.velocity.y), 2.8);
+	if (side === 3) piece.velocity.y = -Math.max(Math.abs(piece.velocity.y), 2.8);
+}
 
 function animate() {
 	const dt = Math.min(clock.getDelta(), 0.05);
@@ -388,6 +485,7 @@ function animate() {
 		v.multiplyScalar(Math.exp(-1.3 * dt));
 		if (v.lengthSq() > MAX_SPEED * MAX_SPEED) v.setLength(MAX_SPEED);
 		g.position.addScaledVector(v, dt);
+		bounceOffCard(piece);
 
 		// hard containment — reflect softly off the walls so a piece can never
 		// rush the camera (huge unclickable blob) or fly off screen
