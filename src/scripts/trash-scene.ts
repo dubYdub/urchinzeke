@@ -1,11 +1,18 @@
 import * as THREE from "three";
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const canvas = document.getElementById("trash-canvas") as HTMLCanvasElement | null;
 if (!canvas) throw new Error("trash-canvas not found");
 
+// Ensure only one instance runs (HMR / double-injection safe)
+const globalScope = window as unknown as { __trashSceneCleanup?: () => void };
+globalScope.__trashSceneCleanup?.();
+
+let rafId = 0;
+let alive = true; // false once this instance is torn down (HMR-safe)
+
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0xfaf6f0, 0.022);
+// no fog — models stay crisp and fully solid
 
 const camera = new THREE.PerspectiveCamera(
 	50,
@@ -19,309 +26,184 @@ const renderer = new THREE.WebGLRenderer({
 	canvas,
 	alpha: true,
 	antialias: true,
+	powerPreference: "high-performance",
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 
-// --- brighter lighting so the vivid materials read as saturated ---
-scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+// --- lighting: bright + colorful so the painted PS1 textures pop ---
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 
-const key = new THREE.DirectionalLight(0xffffff, 1.4);
+const key = new THREE.DirectionalLight(0xffffff, 1.6);
 key.position.set(-4, 6, 8);
 scene.add(key);
 
-const pink = new THREE.PointLight(0xff8fc4, 18, 30);
+const pink = new THREE.PointLight(0xff8fc4, 16, 40);
 pink.position.set(-6, 4, 6);
 scene.add(pink);
 
-const gold = new THREE.PointLight(0xffe08a, 16, 30);
+const gold = new THREE.PointLight(0xffe08a, 14, 40);
 gold.position.set(6, -3, 5);
 scene.add(gold);
 
-const cyan = new THREE.PointLight(0x7fd8ff, 14, 30);
+const cyan = new THREE.PointLight(0x7fd8ff, 12, 40);
 cyan.position.set(0, 6, -4);
 scene.add(cyan);
 
-// --- geometry helpers: low-poly "crumpled" primitives ---
-
-function jitterGeometry(geometry: THREE.BufferGeometry, amount: number) {
-	const position = geometry.attributes.position;
-	const vertex = new THREE.Vector3();
-	for (let i = 0; i < position.count; i++) {
-		vertex.fromBufferAttribute(position, i);
-		vertex.x += (Math.random() - 0.5) * amount;
-		vertex.y += (Math.random() - 0.5) * amount;
-		vertex.z += (Math.random() - 0.5) * amount;
-		position.setXYZ(i, vertex.x, vertex.y, vertex.z);
-	}
-	geometry.computeVertexNormals();
-	return geometry;
+// --- config ---
+// Model list is discovered at build time and injected via the canvas data
+// attribute — drop a new .glb into /public/models and it appears, no code edits.
+const MODEL_FILES: string[] = JSON.parse(canvas.dataset.models || "[]");
+if (MODEL_FILES.length === 0) {
+	console.warn("No models found — add .glb files to /public/models");
 }
 
-function crumpledBall(radius: number) {
-	return jitterGeometry(new THREE.IcosahedronGeometry(radius, 1), radius * 0.16);
-}
-function crumpledCan(radius: number, height: number) {
-	return jitterGeometry(
-		new THREE.CylinderGeometry(radius, radius * 0.9, height, 8, 3),
-		radius * 0.1,
-	);
-}
-function crumpledBox(size: number) {
-	return jitterGeometry(new THREE.BoxGeometry(size, size, size, 2, 2, 2), size * 0.12);
-}
-function crumpledBottle(radius: number, height: number) {
-	return jitterGeometry(
-		new THREE.CylinderGeometry(radius * 0.4, radius, height, 7, 4),
-		radius * 0.08,
-	);
-}
+const TARGET_SIZE = 3.8; // normalized max dimension of every model — bigger
+const COUNT = 14;
+const bounds = { x: 10, y: 5.6, z: 4.5 };
+// hard slab the pieces are confined to, so nothing can rush the camera and
+// appear as a giant unclickable blob before vanishing behind it
+const Z_MIN = -7;
+const Z_MAX = 4; // camera sits at z=14, so pieces stay >=10 units away
+const MAX_SPEED = 13;
 
-// --- unhinged geometry: fuse + distort primitives into crazy shapes ---
+const FLEE_RADIUS = 5.6;
+const FLEE_ACCEL = 90;
+const HOME_K = 1.35;
+const WANDER = 3.6;
+const PANIC_DURATION = 0.5;
 
-function matrixFrom(
-	pos: [number, number, number],
-	rot: [number, number, number],
-	scale: number | [number, number, number],
-) {
-	const s = typeof scale === "number" ? [scale, scale, scale] : scale;
-	return new THREE.Matrix4().compose(
-		new THREE.Vector3(...pos),
-		new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)),
-		new THREE.Vector3(...s),
-	);
-}
-
-function mergeParts(
-	parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[],
-) {
-	const geos = parts.map((p) => {
-		const g = p.geo.toNonIndexed();
-		if (p.matrix) g.applyMatrix4(p.matrix);
-		return g;
-	});
-	const merged = mergeGeometries(geos, false);
-	merged.computeVertexNormals();
-	return merged;
-}
-
-// spiky sea urchin — pull random vertices way out into spikes
-function spikeUrchin(radius: number) {
-	const geo = new THREE.IcosahedronGeometry(radius, 2);
-	const pos = geo.attributes.position;
-	const v = new THREE.Vector3();
-	for (let i = 0; i < pos.count; i++) {
-		v.fromBufferAttribute(pos, i);
-		const spike = Math.random() < 0.45 ? 1.4 + Math.random() * 1.3 : 1;
-		v.setLength(v.length() * spike);
-		pos.setXYZ(i, v.x, v.y, v.z);
-	}
-	geo.computeVertexNormals();
-	return geo;
-}
-
-// tangled torus knot
-function torusKnot(radius: number) {
-	const p = 2 + Math.floor(Math.random() * 3);
-	const q = 3 + Math.floor(Math.random() * 4);
-	return jitterGeometry(
-		new THREE.TorusKnotGeometry(radius, radius * 0.3, 100, 8, p, q),
-		radius * 0.06,
-	);
-}
-
-// gloopy metaball-ish cluster of fused spheres
-function blobCluster(radius: number) {
-	const count = 3 + Math.floor(Math.random() * 3);
-	const parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[] = [];
-	for (let i = 0; i < count; i++) {
-		const r = radius * (0.5 + Math.random() * 0.6);
-		parts.push({
-			geo: new THREE.IcosahedronGeometry(r, 1),
-			matrix: matrixFrom(
-				[
-					(Math.random() - 0.5) * radius * 1.6,
-					(Math.random() - 0.5) * radius * 1.6,
-					(Math.random() - 0.5) * radius * 1.6,
-				],
-				[0, 0, 0],
-				1,
-			),
-		});
-	}
-	return jitterGeometry(mergeParts(parts), radius * 0.14);
-}
-
-// jack / caltrop — perpendicular stretched spikes
-function jack(radius: number) {
-	const arm = () =>
-		new THREE.ConeGeometry(radius * 0.3, radius * 2.2, 5);
-	return mergeParts([
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, 0], 1) },
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [Math.PI, 0, 0], 1) },
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, Math.PI / 2], 1) },
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, -Math.PI / 2], 1) },
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [Math.PI / 2, 0, 0], 1) },
-		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [-Math.PI / 2, 0, 0], 1) },
-	]);
-}
-
-// frankenstein — fuse a few random primitives at random transforms
-function frankenstein(scale: number) {
-	const pool = [
-		() => new THREE.BoxGeometry(scale, scale, scale),
-		() => new THREE.ConeGeometry(scale * 0.6, scale * 1.6, 6),
-		() => new THREE.CylinderGeometry(scale * 0.4, scale * 0.6, scale * 1.4, 6),
-		() => new THREE.TetrahedronGeometry(scale * 0.9),
-		() => new THREE.TorusGeometry(scale * 0.7, scale * 0.28, 6, 10),
-		() => new THREE.IcosahedronGeometry(scale * 0.8, 0),
-	];
-	const count = 3 + Math.floor(Math.random() * 3);
-	const parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[] = [];
-	for (let i = 0; i < count; i++) {
-		parts.push({
-			geo: pool[Math.floor(Math.random() * pool.length)](),
-			matrix: matrixFrom(
-				[
-					(Math.random() - 0.5) * scale * 1.4,
-					(Math.random() - 0.5) * scale * 1.4,
-					(Math.random() - 0.5) * scale * 1.4,
-				],
-				[
-					Math.random() * Math.PI,
-					Math.random() * Math.PI,
-					Math.random() * Math.PI,
-				],
-				0.7 + Math.random() * 0.8,
-			),
-		});
-	}
-	return jitterGeometry(mergeParts(parts), scale * 0.1);
-}
-
-// --- vivid palette + procedural "painted patch" textures for the PS1 look ---
-
-const vividPalette = [
-	{ base: "#3b6dd6", patch: ["#7fb0ff", "#1e3f8f", "#ffffff"] }, // shark blue
-	{ base: "#c1622a", patch: ["#e79b52", "#8f3d15", "#f4d9a0"] }, // monkey brown
-	{ base: "#3f7d4f", patch: ["#8fce77", "#1e4d2b", "#d7e8a0"] }, // duck green
-	{ base: "#d94f4f", patch: ["#ff8a8a", "#9c2020", "#ffd34d"] }, // ketchup red
-	{ base: "#e8b53a", patch: ["#fff0a0", "#b07d12", "#ff9d3a"] }, // crab yellow
-	{ base: "#e6e9ef", patch: ["#ffffff", "#b9c2d6", "#4a5468"] }, // seagull white
-	{ base: "#8a4fd6", patch: ["#c79bff", "#4a1e8f", "#ff9de0"] }, // grape violet
-	{ base: "#28c0c0", patch: ["#8ff0f0", "#0d6d6d", "#ffffff"] }, // teal
+const confettiColors = [
+	0xff5d8f, 0xffd23f, 0x3bd6c6, 0x6c8cff, 0xa06bff,
+	0xff8a3d, 0x63e06a, 0xffffff,
 ];
 
-function paintedTexture(scheme: { base: string; patch: string[] }) {
-	const size = 128;
-	const c = document.createElement("canvas");
-	c.width = c.height = size;
-	const ctx = c.getContext("2d")!;
-	ctx.fillStyle = scheme.base;
-	ctx.fillRect(0, 0, size, size);
-	for (let i = 0; i < 26; i++) {
-		ctx.fillStyle = scheme.patch[i % scheme.patch.length];
-		ctx.globalAlpha = 0.35 + Math.random() * 0.5;
-		ctx.beginPath();
-		ctx.ellipse(
-			Math.random() * size,
-			Math.random() * size,
-			4 + Math.random() * 22,
-			4 + Math.random() * 22,
-			Math.random() * Math.PI,
-			0,
-			Math.PI * 2,
-		);
-		ctx.fill();
-	}
-	ctx.globalAlpha = 1;
-	const tex = new THREE.CanvasTexture(c);
-	tex.colorSpace = THREE.SRGBColorSpace;
-	return tex;
+// --- load + normalize every model into a reusable prototype ---
+
+type Prototype = { name: string; holder: THREE.Group };
+
+function prepPrototype(gltf: { scene: THREE.Group }, name: string): Prototype {
+	const root = gltf.scene;
+	const box = new THREE.Box3().setFromObject(root);
+	const size = box.getSize(new THREE.Vector3());
+	const center = box.getCenter(new THREE.Vector3());
+	const maxDim = Math.max(size.x, size.y, size.z) || 1;
+	const scale = TARGET_SIZE / maxDim;
+
+	root.position.sub(center); // recenter geometry on origin
+	const holder = new THREE.Group();
+	holder.add(root);
+	holder.scale.setScalar(scale);
+	return { name, holder };
 }
 
-type TrashPiece = {
-	mesh: THREE.Mesh;
-	material: THREE.MeshStandardMaterial;
-	basePosition: THREE.Vector3;
-	bobSpeed: number;
-	bobOffset: number;
-	rotSpeed: THREE.Vector3;
-	driftSpeed: THREE.Vector3;
-	scheme: { base: string; patch: string[] };
+const loader = new GLTFLoader();
+function loadModel(name: string): Promise<Prototype | null> {
+	return new Promise((resolve) => {
+		loader.load(
+			`/models/${name}.glb`,
+			(gltf) => resolve(prepPrototype(gltf as { scene: THREE.Group }, name)),
+			undefined,
+			(err) => {
+				console.warn(`Failed to load ${name}.glb`, err);
+				resolve(null);
+			},
+		);
+	});
+}
+
+// --- pieces ---
+
+type Piece = {
+	group: THREE.Group;
+	materials: THREE.Material[];
+	velocity: THREE.Vector3;
+	home: THREE.Vector3;
+	spin: THREE.Vector3;
+	wander: THREE.Vector3;
+	burst: number;
+	state: "spawning" | "alive" | "panic";
+	panicT: number;
+	targetScale: number;
 };
 
-const pieces: TrashPiece[] = [];
-const builders = [
-	// the unhinged crew (weighted heavily)
-	() => spikeUrchin(0.7 + Math.random() * 0.5),
-	() => spikeUrchin(0.7 + Math.random() * 0.5),
-	() => torusKnot(0.5 + Math.random() * 0.4),
-	() => torusKnot(0.5 + Math.random() * 0.4),
-	() => blobCluster(0.6 + Math.random() * 0.4),
-	() => blobCluster(0.6 + Math.random() * 0.4),
-	() => jack(0.55 + Math.random() * 0.4),
-	() => frankenstein(0.6 + Math.random() * 0.5),
-	() => frankenstein(0.6 + Math.random() * 0.5),
-	// a little tame trash for contrast
-	() => crumpledBall(0.6 + Math.random() * 0.5),
-	() => crumpledCan(0.35 + Math.random() * 0.2, 1 + Math.random() * 0.6),
-];
+const pieces: Piece[] = [];
+let prototypes: Prototype[] = [];
 
-const TRASH_COUNT = 22;
-const bounds = { x: 9, y: 6, z: 6 };
+// shuffle-bag: draw every model once before repeating, so all of them appear
+let protoBag: Prototype[] = [];
+function nextPrototype(): Prototype {
+	if (protoBag.length === 0) {
+		protoBag = [...prototypes];
+		for (let i = protoBag.length - 1; i > 0; i--) {
+			const j = Math.floor(Math.random() * (i + 1));
+			[protoBag[i], protoBag[j]] = [protoBag[j], protoBag[i]];
+		}
+	}
+	return protoBag.pop() as Prototype;
+}
 
-function randomBasePosition() {
+function randomHome() {
 	return new THREE.Vector3(
 		(Math.random() - 0.5) * bounds.x * 2,
 		(Math.random() - 0.5) * bounds.y * 2,
-		(Math.random() - 0.5) * bounds.z * 2 - 2,
+		(Math.random() - 0.5) * bounds.z * 2 - 1.5,
 	);
 }
 
-function spawnPiece(basePosition = randomBasePosition()) {
-	const geometry = builders[Math.floor(Math.random() * builders.length)]();
-	const scheme = vividPalette[Math.floor(Math.random() * vividPalette.length)];
-	const material = new THREE.MeshStandardMaterial({
-		map: paintedTexture(scheme),
-		flatShading: true,
-		roughness: 0.55,
-		metalness: 0.1,
-		transparent: true,
+function spawnPiece(home = randomHome()) {
+	if (!alive || prototypes.length === 0) return;
+	const proto = nextPrototype();
+	const group = proto.holder.clone(true);
+	// per-piece size variety so the field doesn't look uniform
+	const targetScale = group.scale.x * (0.7 + Math.random() * 0.7);
+
+	const materials: THREE.Material[] = [];
+	group.traverse((o) => {
+		const mesh = o as THREE.Mesh;
+		if (mesh.isMesh) {
+			const mat = (mesh.material as THREE.Material).clone();
+			mat.transparent = false; // fully solid, never see-through
+			mat.opacity = 1;
+			mat.depthWrite = true;
+			mesh.material = mat;
+			materials.push(mat);
+		}
 	});
-	const mesh = new THREE.Mesh(geometry, material);
-	mesh.position.copy(basePosition);
-	mesh.rotation.set(
+
+	group.position.copy(home);
+	group.rotation.set(
 		Math.random() * Math.PI,
 		Math.random() * Math.PI,
 		Math.random() * Math.PI,
 	);
-	mesh.scale.setScalar(0.01); // pop-in
-	scene.add(mesh);
+	group.scale.setScalar(0.01); // pop-in
 
-	const piece: TrashPiece = {
-		mesh,
-		material,
-		basePosition,
-		bobSpeed: 0.4 + Math.random() * 0.5,
-		bobOffset: Math.random() * Math.PI * 2,
-		rotSpeed: new THREE.Vector3(
-			(Math.random() - 0.5) * 0.7,
-			(Math.random() - 0.5) * 0.7,
-			(Math.random() - 0.5) * 0.7,
+	const piece: Piece = {
+		group,
+		materials,
+		velocity: new THREE.Vector3(),
+		home,
+		spin: new THREE.Vector3(
+			(Math.random() - 0.5) * 1.3,
+			(Math.random() - 0.5) * 1.3,
+			(Math.random() - 0.5) * 1.3,
 		),
-		driftSpeed: new THREE.Vector3(
-			(Math.random() - 0.5) * 0.05,
-			(Math.random() - 0.5) * 0.05,
-			(Math.random() - 0.5) * 0.05,
+		wander: new THREE.Vector3(
+			Math.random() * 10,
+			Math.random() * 10,
+			Math.random() * 10,
 		),
-		scheme,
+		burst: confettiColors[Math.floor(Math.random() * confettiColors.length)],
+		state: "spawning",
+		panicT: 0,
+		targetScale,
 	};
+	group.userData.piece = piece;
+	scene.add(group);
 	pieces.push(piece);
 	return piece;
 }
-
-for (let i = 0; i < TRASH_COUNT; i++) spawnPiece();
 
 // --- explosion shards ---
 
@@ -335,23 +217,25 @@ type Shard = {
 };
 
 const shards: Shard[] = [];
-const shardGeo = new THREE.TetrahedronGeometry(0.22, 0);
+const shardGeo = new THREE.TetrahedronGeometry(0.24, 0);
 
-function explode(piece: TrashPiece) {
-	const origin = piece.mesh.position.clone();
-	const count = 14 + Math.floor(Math.random() * 8);
+function explode(piece: Piece) {
+	const origin = piece.group.position.clone();
+	const count = 16 + Math.floor(Math.random() * 10);
 	for (let i = 0; i < count; i++) {
+		const color =
+			i % 3 === 0
+				? piece.burst
+				: confettiColors[Math.floor(Math.random() * confettiColors.length)];
 		const material = new THREE.MeshStandardMaterial({
-			color: new THREE.Color(
-				piece.scheme.patch[i % piece.scheme.patch.length],
-			),
+			color,
 			flatShading: true,
 			roughness: 0.5,
 			transparent: true,
 		});
 		const mesh = new THREE.Mesh(shardGeo, material);
 		mesh.position.copy(origin);
-		mesh.scale.setScalar(0.5 + Math.random() * 0.9);
+		mesh.scale.setScalar(0.5 + Math.random());
 		const dir = new THREE.Vector3(
 			Math.random() - 0.5,
 			Math.random() - 0.5,
@@ -361,100 +245,190 @@ function explode(piece: TrashPiece) {
 		shards.push({
 			mesh,
 			material,
-			velocity: dir.multiplyScalar(4 + Math.random() * 5),
+			velocity: dir.multiplyScalar(5 + Math.random() * 6),
 			angular: new THREE.Vector3(
-				(Math.random() - 0.5) * 12,
-				(Math.random() - 0.5) * 12,
-				(Math.random() - 0.5) * 12,
+				(Math.random() - 0.5) * 14,
+				(Math.random() - 0.5) * 14,
+				(Math.random() - 0.5) * 14,
 			),
 			life: 0,
 			maxLife: 0.9 + Math.random() * 0.5,
 		});
 	}
 
-	// remove the piece and respawn a fresh one shortly after
-	scene.remove(piece.mesh);
-	piece.material.map?.dispose();
-	piece.material.dispose();
-	piece.mesh.geometry.dispose();
+	scene.remove(piece.group);
+	for (const m of piece.materials) m.dispose();
 	const idx = pieces.indexOf(piece);
 	if (idx !== -1) pieces.splice(idx, 1);
-	window.setTimeout(() => spawnPiece(), 600 + Math.random() * 900);
+	window.setTimeout(() => {
+		if (alive) spawnPiece();
+	}, 500 + Math.random() * 900);
 }
 
-// --- interaction: click / tap to explode ---
+// --- pointer / interaction ---
 
+const pointerNdc = new THREE.Vector2();
+let hasPointer = false;
 const raycaster = new THREE.Raycaster();
-const clickNdc = new THREE.Vector2();
+const cursorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const cursorWorld = new THREE.Vector3(999, 999, 0);
 
-function handleClick(clientX: number, clientY: number) {
-	clickNdc.x = (clientX / window.innerWidth) * 2 - 1;
-	clickNdc.y = -(clientY / window.innerHeight) * 2 + 1;
-	raycaster.setFromCamera(clickNdc, camera);
-	const meshes = pieces.map((p) => p.mesh);
-	const hits = raycaster.intersectObjects(meshes, false);
-	if (hits.length > 0) {
-		const hitMesh = hits[0].object;
-		const piece = pieces.find((p) => p.mesh === hitMesh);
-		if (piece) explode(piece);
+function onPointerMove(event: PointerEvent) {
+	pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
+	pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
+	hasPointer = true;
+}
+
+function onPointerDown(event: PointerEvent) {
+	// derive NDC from the event itself — a tap may not fire pointermove first
+	pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
+	pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
+	hasPointer = true;
+	raycaster.setFromCamera(pointerNdc, camera);
+	const hits = raycaster.intersectObjects(
+		pieces.map((p) => p.group),
+		true,
+	);
+	if (hits.length === 0) return;
+	let o: THREE.Object3D | null = hits[0].object;
+	while (o && !o.userData.piece) o = o.parent;
+	if (o) {
+		const piece = o.userData.piece as Piece;
+		if (piece.state !== "panic") {
+			piece.state = "panic";
+			piece.panicT = 0;
+			// launch a startled kick away from the cursor
+			const away = piece.group.position.clone().sub(cursorWorld);
+			away.z = 0;
+			piece.velocity.addScaledVector(away.normalize(), 12);
+		}
 	}
 }
 
-window.addEventListener("pointerdown", (event) => {
-	handleClick(event.clientX, event.clientY);
-});
-
-// --- gentle mouse parallax ---
-const pointer = { x: 0, y: 0 };
-window.addEventListener("pointermove", (event) => {
-	pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
-	pointer.y = (event.clientY / window.innerHeight) * 2 - 1;
-});
-
-window.addEventListener("resize", () => {
+function onResize() {
 	camera.aspect = window.innerWidth / window.innerHeight;
 	camera.updateProjectionMatrix();
 	renderer.setSize(window.innerWidth, window.innerHeight);
-});
+}
+
+window.addEventListener("pointermove", onPointerMove);
+window.addEventListener("pointerdown", onPointerDown);
+window.addEventListener("resize", onResize);
+
+// --- main loop ---
 
 const clock = new THREE.Clock();
+const tmp = new THREE.Vector3();
 
 function animate() {
 	const dt = Math.min(clock.getDelta(), 0.05);
 	const t = clock.elapsedTime;
 
-	for (const piece of pieces) {
-		piece.mesh.position.x =
-			piece.basePosition.x + Math.sin(t * piece.driftSpeed.x * 10) * 0.6;
-		piece.mesh.position.y =
-			piece.basePosition.y +
-			Math.sin(t * piece.bobSpeed + piece.bobOffset) * 0.4;
-		piece.mesh.position.z =
-			piece.basePosition.z + Math.cos(t * piece.driftSpeed.z * 10) * 0.6;
-
-		piece.mesh.rotation.x += piece.rotSpeed.x * 0.01;
-		piece.mesh.rotation.y += piece.rotSpeed.y * 0.01;
-		piece.mesh.rotation.z += piece.rotSpeed.z * 0.01;
-
-		// ease scale toward 1 for the pop-in
-		const s = piece.mesh.scale.x;
-		if (s < 1) piece.mesh.scale.setScalar(Math.min(1, s + dt * 3));
-
-		const distance = camera.position.distanceTo(piece.mesh.position);
-		const depthFade = THREE.MathUtils.clamp(
-			THREE.MathUtils.mapLinear(distance, 10, 23, 1, 0.35),
-			0.35,
-			1,
-		);
-		piece.material.opacity = depthFade;
+	// update cursor world point on the z=0 plane
+	if (hasPointer) {
+		raycaster.setFromCamera(pointerNdc, camera);
+		raycaster.ray.intersectPlane(cursorPlane, cursorWorld);
 	}
 
-	// advance shards
+	// pieces whose panic finished this frame — exploded after the loop so we
+	// never mutate `pieces` while iterating it
+	const toExplode: Piece[] = [];
+
+	for (const piece of pieces) {
+		const g = piece.group;
+
+		// pop-in scaling
+		if (piece.state === "spawning") {
+			const s = Math.min(piece.targetScale, g.scale.x + dt * piece.targetScale * 3);
+			g.scale.setScalar(s);
+			if (s >= piece.targetScale - 1e-3) piece.state = "alive";
+		}
+
+		if (piece.state === "panic") {
+			piece.panicT += dt;
+			// freak out: violent shake, rapid spin, scale pulse
+			const shake = 0.12;
+			g.position.x += (Math.random() - 0.5) * shake;
+			g.position.y += (Math.random() - 0.5) * shake;
+			const pulse =
+				piece.targetScale * (1 + Math.sin(piece.panicT * 55) * 0.22);
+			g.scale.setScalar(pulse);
+			g.rotation.x += 22 * dt;
+			g.rotation.y += 28 * dt;
+			g.rotation.z += 18 * dt;
+			if (piece.panicT >= PANIC_DURATION) toExplode.push(piece);
+			continue;
+		}
+
+		// --- drift forces (alive + spawning) ---
+		const v = piece.velocity;
+
+		// wander
+		v.x += Math.sin(t * 0.6 + piece.wander.x) * WANDER * dt;
+		v.y += Math.sin(t * 0.5 + piece.wander.y) * WANDER * dt;
+		v.z += Math.sin(t * 0.4 + piece.wander.z) * WANDER * dt * 0.5;
+
+		// spring toward home
+		tmp.copy(piece.home).sub(g.position);
+		v.addScaledVector(tmp, HOME_K * dt);
+
+		// flee from cursor (planar)
+		let scare = 0;
+		if (hasPointer) {
+			tmp.copy(g.position).sub(cursorWorld);
+			tmp.z = 0;
+			const d = tmp.length();
+			if (d < FLEE_RADIUS) {
+				scare = 1 - d / FLEE_RADIUS;
+				v.addScaledVector(tmp.normalize(), scare * FLEE_ACCEL * dt);
+			}
+		}
+
+		// damping + speed cap + integrate
+		v.multiplyScalar(Math.exp(-1.3 * dt));
+		if (v.lengthSq() > MAX_SPEED * MAX_SPEED) v.setLength(MAX_SPEED);
+		g.position.addScaledVector(v, dt);
+
+		// hard containment — reflect softly off the walls so a piece can never
+		// rush the camera (huge unclickable blob) or fly off screen
+		if (g.position.x < -bounds.x) {
+			g.position.x = -bounds.x;
+			v.x *= -0.4;
+		} else if (g.position.x > bounds.x) {
+			g.position.x = bounds.x;
+			v.x *= -0.4;
+		}
+		if (g.position.y < -bounds.y) {
+			g.position.y = -bounds.y;
+			v.y *= -0.4;
+		} else if (g.position.y > bounds.y) {
+			g.position.y = bounds.y;
+			v.y *= -0.4;
+		}
+		if (g.position.z < Z_MIN) {
+			g.position.z = Z_MIN;
+			v.z *= -0.4;
+		} else if (g.position.z > Z_MAX) {
+			g.position.z = Z_MAX;
+			v.z *= -0.4;
+		}
+
+		// spin — faster when scared
+		const spinBoost = 1 + scare * 8;
+		g.rotation.x += piece.spin.x * dt * spinBoost;
+		g.rotation.y += piece.spin.y * dt * spinBoost;
+		g.rotation.z += piece.spin.z * dt * spinBoost;
+	}
+
+	// now safe to remove/respawn — iteration over `pieces` is done
+	for (const piece of toExplode) explode(piece);
+
+	// shards
 	for (let i = shards.length - 1; i >= 0; i--) {
 		const shard = shards[i];
 		shard.life += dt;
-		shard.velocity.y -= 6 * dt; // gravity
-		shard.velocity.multiplyScalar(0.98); // drag
+		shard.velocity.y -= 7 * dt;
+		shard.velocity.multiplyScalar(0.98);
 		shard.mesh.position.addScaledVector(shard.velocity, dt);
 		shard.mesh.rotation.x += shard.angular.x * dt;
 		shard.mesh.rotation.y += shard.angular.y * dt;
@@ -469,12 +443,43 @@ function animate() {
 		}
 	}
 
-	camera.position.x += (pointer.x * 1.2 - camera.position.x) * 0.02;
-	camera.position.y += (-pointer.y * 0.8 - camera.position.y) * 0.02;
+	// gentle camera parallax
+	const px = hasPointer ? pointerNdc.x : 0;
+	const py = hasPointer ? pointerNdc.y : 0;
+	camera.position.x += (px * 1.1 - camera.position.x) * 0.02;
+	camera.position.y += (py * 0.7 - camera.position.y) * 0.02;
 	camera.lookAt(0, 0, 0);
 
 	renderer.render(scene, camera);
-	requestAnimationFrame(animate);
+	rafId = requestAnimationFrame(animate);
 }
 
+// --- boot ---
+Promise.all(MODEL_FILES.map(loadModel)).then((loaded) => {
+	if (!alive) return; // this instance was torn down while models loaded
+	prototypes = loaded.filter((p): p is Prototype => p !== null);
+	if (prototypes.length === 0) {
+		console.error("No models loaded.");
+		return;
+	}
+	for (let i = 0; i < COUNT; i++) spawnPiece();
+});
+
 animate();
+
+// --- teardown so exactly one instance is ever live ---
+function cleanup() {
+	alive = false; // stops any pending async spawns from this instance
+	cancelAnimationFrame(rafId);
+	window.removeEventListener("pointermove", onPointerMove);
+	window.removeEventListener("pointerdown", onPointerDown);
+	window.removeEventListener("resize", onResize);
+	for (const piece of pieces) scene.remove(piece.group);
+	for (const shard of shards) scene.remove(shard.mesh);
+	renderer.dispose();
+}
+globalScope.__trashSceneCleanup = cleanup;
+
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => cleanup());
+}

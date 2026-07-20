@@ -1,5 +1,19 @@
 ---
+import fs from "node:fs";
+import path from "node:path";
 
+// Discover models at build time — drop a .glb into public/models and it shows up.
+let models: string[] = [];
+try {
+	const dir = path.join(process.cwd(), "public", "models");
+	models = fs
+		.readdirSync(dir)
+		.filter((f) => f.toLowerCase().endsWith(".glb"))
+		.map((f) => f.slice(0, -4))
+		.sort();
+} catch (err) {
+	console.warn("Could not read public/models:", err);
+}
 ---
 
 <html lang="en">
@@ -8,15 +22,28 @@
 		<meta name="viewport" content="width=device-width" />
 		<title>urchin zeke</title>
 	</head>
-	<div class="mist">
-		<div class="blob blob-1"></div>
-		<div class="blob blob-2"></div>
-		<div class="blob blob-3"></div>
-		<div class="blob blob-4"></div>
-		<div class="grain"></div>
+
+	<div class="sky">
+		<!-- each element is blurred on its own so transform animations stay on the
+		     GPU compositor (no per-frame re-raster = no lag) -->
+		<div class="rays"></div>
+		<div class="sun"></div>
+		<div class="rainbow"></div>
+		<div class="cloud cloud-1"></div>
+		<div class="cloud cloud-2"></div>
+		<div class="cloud cloud-3"></div>
+		<div class="cloud cloud-4"></div>
+		<div class="grass"></div>
+		<div class="lowpoly"></div>
+
+		<!-- glitch + CRT layers on top -->
+		<div class="glitch glitch-a"></div>
+		<div class="glitch glitch-b"></div>
+		<div class="scanlines"></div>
+		<div class="vignette"></div>
 	</div>
 
-	<canvas id="trash-canvas"></canvas>
+	<canvas id="trash-canvas" data-models={JSON.stringify(models)}></canvas>
 
 	<script>
 		import "../scripts/trash-scene.ts";
@@ -25,88 +52,236 @@
 	<style>
 		body {
 			margin: 0;
+			overflow: hidden;
+			background: #1f7fd0;
 		}
 
-		.mist {
+		.sky {
 			position: fixed;
-			top: -10%;
-			left: -10%;
-			width: 120vw;
-			height: 120vh;
-			filter: blur(100px);
-			background:
-				radial-gradient(
-					circle at 22% 28%,
-					rgba(255, 198, 205, 0.5) 0%,
-					rgba(255, 255, 255, 0) 55%
-				),
-				radial-gradient(
-					circle at 78% 20%,
-					rgba(250, 232, 168, 0.45) 0%,
-					rgba(255, 255, 255, 0) 55%
-				),
-				radial-gradient(
-					circle at 65% 70%,
-					rgba(198, 176, 230, 0.4) 0%,
-					rgba(255, 255, 255, 0) 55%
-				),
-				radial-gradient(
-					circle at 15% 75%,
-					rgba(178, 205, 172, 0.35) 0%,
-					rgba(255, 255, 255, 0) 55%
-				),
-				rgb(250, 247, 242);
+			inset: 0;
+			overflow: hidden;
+			background: linear-gradient(
+				to bottom,
+				#1877d6 0%,
+				#3a97e8 35%,
+				#7fc4f5 65%,
+				#bfe6ff 100%
+			);
 		}
-		.blob {
+
+		/* --- sun --- */
+		.sun {
 			position: absolute;
-			width: 40vw;
-			height: 40vw;
+			top: 4%;
+			left: 8%;
+			width: 26vmax;
+			height: 26vmax;
 			border-radius: 50%;
-			filter: blur(80px);
+			background: radial-gradient(
+				circle,
+				#ffffff 0%,
+				#fffbe0 22%,
+				rgba(255, 244, 170, 0.7) 45%,
+				rgba(255, 240, 150, 0) 72%
+			);
+			filter: blur(5px);
+			will-change: transform;
+			animation: sunPulse 6s ease-in-out infinite;
 		}
 
-		.blob-1 {
-			top: 10%;
-			left: 10%;
-			background: rgba(255, 205, 214, 0.5);
-			animation: drift-1 18s ease-in-out infinite;
+		/* --- god rays --- */
+		.rays {
+			position: absolute;
+			top: 17%;
+			left: 21%;
+			width: 110vmax;
+			height: 110vmax;
+			transform: translate(-50%, -50%);
+			will-change: transform;
+			border-radius: 50%;
+			background: repeating-conic-gradient(
+				from 0deg at 50% 50%,
+				rgba(255, 255, 255, 0) 0deg 5deg,
+				rgba(255, 255, 255, 0.16) 5deg 8deg
+			);
+			-webkit-mask: radial-gradient(
+				circle,
+				#000 0%,
+				rgba(0, 0, 0, 0.5) 30%,
+				transparent 62%
+			);
+			mask: radial-gradient(
+				circle,
+				#000 0%,
+				rgba(0, 0, 0, 0.5) 30%,
+				transparent 62%
+			);
+			mix-blend-mode: screen;
+			filter: blur(5px);
+			animation: spin 90s linear infinite;
 		}
 
-		.blob-2 {
-			top: 15%;
-			right: 5%;
-			background: rgba(250, 234, 176, 0.45);
-			animation: drift-2 18s ease-in-out infinite;
-			animation-delay: -7s;
+		/* --- rainbow arc --- */
+		.rainbow {
+			position: absolute;
+			left: 46%;
+			bottom: -78vmax;
+			width: 150vmax;
+			height: 150vmax;
+			transform: translateX(-50%);
+			border-radius: 50%;
+			background: radial-gradient(
+				circle,
+				transparent 0 37.5%,
+				rgba(148, 0, 211, 0.45) 37.5% 39.5%,
+				rgba(75, 0, 220, 0.5) 39.5% 41.5%,
+				rgba(0, 120, 255, 0.55) 41.5% 43.5%,
+				rgba(0, 220, 90, 0.55) 43.5% 45.5%,
+				rgba(255, 240, 0, 0.6) 45.5% 47.5%,
+				rgba(255, 150, 0, 0.6) 47.5% 49.5%,
+				rgba(255, 40, 40, 0.6) 49.5% 51.5%,
+				transparent 51.5%
+			);
+			filter: blur(7px);
+			mix-blend-mode: screen;
+			animation: rainbowGlow 8s ease-in-out infinite;
 		}
 
-		.blob-3 {
-			bottom: 10%;
-			left: 35%;
-			background: rgba(203, 190, 232, 0.4);
-			animation: drift-3 11s ease-in-out infinite;
-			animation-delay: -60s;
+		/* --- clouds --- */
+		.cloud {
+			position: absolute;
+			border-radius: 50%;
+			background: radial-gradient(
+				circle,
+				rgba(255, 255, 255, 0.95) 0%,
+				rgba(255, 255, 255, 0.7) 45%,
+				rgba(255, 255, 255, 0) 70%
+			);
+			filter: blur(20px);
+			will-change: transform;
+		}
+		.cloud-1 {
+			top: 18%;
+			width: 34vw;
+			height: 16vw;
+			left: -20vw;
+			animation: drift 46s linear infinite;
+		}
+		.cloud-2 {
+			top: 44%;
+			width: 28vw;
+			height: 13vw;
+			left: -25vw;
+			animation: drift 64s linear infinite;
+			animation-delay: -20s;
+		}
+		.cloud-3 {
+			top: 8%;
+			width: 40vw;
+			height: 17vw;
+			left: -30vw;
+			animation: drift 80s linear infinite;
+			animation-delay: -50s;
+		}
+		.cloud-4 {
+			top: 60%;
+			width: 24vw;
+			height: 12vw;
+			left: -20vw;
+			animation: drift 54s linear infinite;
+			animation-delay: -35s;
 		}
 
-		.blob-4 {
-			bottom: 10%;
-			left: 35%;
-			background: rgba(182, 208, 176, 0.3);
-			animation: drift-4 11s ease-in-out infinite;
-			animation-delay: -60s;
+		/* --- grass --- */
+		.grass {
+			position: absolute;
+			left: -5%;
+			bottom: -4vh;
+			width: 110%;
+			height: 24vh;
+			background: linear-gradient(
+				to bottom,
+				#7ed957 0%,
+				#57c33a 45%,
+				#3a9e28 100%
+			);
+			border-top-left-radius: 55% 60px;
+			border-top-right-radius: 45% 90px;
+			box-shadow: 0 -14px 50px rgba(255, 255, 255, 0.45);
 		}
 
-		.grain {
-			position: fixed;
-			top: 0;
-			left: 0;
-			width: 100vw;
-			height: 100vh;
+		/* --- low-poly holographic facets --- */
+		.lowpoly {
+			position: absolute;
+			inset: 0;
+			background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cpath d='M0 0 L60 0 L0 60 Z' fill='%23ffffff' fill-opacity='0.06'/%3E%3Cpath d='M60 0 L120 0 L120 60 Z' fill='%2300eaff' fill-opacity='0.06'/%3E%3Cpath d='M0 60 L0 120 L60 120 Z' fill='%23ff5ecb' fill-opacity='0.06'/%3E%3Cpath d='M120 60 L120 120 L60 120 Z' fill='%23ffffff' fill-opacity='0.05'/%3E%3Cpath d='M60 0 L120 60 L60 60 Z' fill='%23ffd23f' fill-opacity='0.05'/%3E%3Cpath d='M0 60 L60 120 L60 60 Z' fill='%23a06bff' fill-opacity='0.05'/%3E%3C/svg%3E");
+			background-size: 130px 130px;
+			mix-blend-mode: overlay;
+			opacity: 0.8;
+			filter: blur(1px);
+			animation: facetShift 12s steps(6) infinite;
+		}
+
+		/* --- glitch bands (chromatic split) --- */
+		.glitch {
+			position: absolute;
+			inset: 0;
 			pointer-events: none;
-			opacity: 0.5;
-			mix-blend-mode: soft-light;
-			background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='6'%3E%3Ccircle cx='1' cy='1' r='0.9' fill='%23000' fill-opacity='0.55'/%3E%3C/svg%3E");
-			background-size: 6px 6px;
+			mix-blend-mode: screen;
+			will-change: transform, opacity, clip-path;
+			opacity: 0;
+			background: linear-gradient(
+				100deg,
+				rgba(255, 0, 128, 0.35),
+				rgba(0, 255, 240, 0.25) 45%,
+				rgba(150, 0, 255, 0.35)
+			);
+		}
+		.glitch-a {
+			animation: glitchA 3.4s steps(1) infinite;
+		}
+		.glitch-b {
+			background: linear-gradient(
+				260deg,
+				rgba(0, 255, 200, 0.3),
+				rgba(255, 60, 160, 0.28) 50%,
+				rgba(90, 160, 255, 0.3)
+			);
+			animation: glitchB 2.7s steps(1) infinite;
+		}
+
+		/* --- CRT scanlines --- */
+		.scanlines {
+			position: absolute;
+			inset: 0;
+			pointer-events: none;
+			background: repeating-linear-gradient(
+				to bottom,
+				rgba(0, 0, 0, 0.14) 0 1px,
+				rgba(255, 255, 255, 0.02) 1px 2px,
+				transparent 2px 4px
+			);
+			mix-blend-mode: overlay;
+			opacity: 0.55;
+			animation: scanroll 8s linear infinite;
+		}
+
+		/* --- dramatic vignette / glow --- */
+		.vignette {
+			position: absolute;
+			inset: 0;
+			pointer-events: none;
+			background: radial-gradient(
+				ellipse at 20% 15%,
+				rgba(255, 255, 240, 0.35) 0%,
+				rgba(255, 255, 255, 0) 45%
+			),
+			radial-gradient(
+				ellipse at 50% 55%,
+				rgba(0, 0, 0, 0) 55%,
+				rgba(10, 40, 80, 0.28) 100%
+			);
+			mix-blend-mode: screen;
 		}
 
 		#trash-canvas {
@@ -119,53 +294,139 @@
 			cursor: crosshair;
 		}
 
-		@keyframes drift-3 {
-			0% {
-				transform: translate(0, 0) scale(1);
+		@keyframes sunPulse {
+			0%,
+			100% {
+				transform: scale(1);
+				opacity: 0.95;
 			}
 			50% {
-				transform: translate(40vw, -46vh) scale(1.15);
-			}
-			100% {
-				transform: translate(0, 0) scale(1);
+				transform: scale(1.08);
+				opacity: 1;
 			}
 		}
 
-		@keyframes drift-2 {
-			0% {
-				transform: translate(0, 0) scale(1);
-			}
-			50% {
-				transform: translate(-49vw, 34vh) scale(0.9);
-			}
-			100% {
-				transform: translate(0, 0) scale(1);
-			}
-		}
-		@keyframes drift-1 {
-			0% {
-				transform: translate(0, 0) scale(1);
-			}
-			50% {
-				transform: translate(35vw, 30vh) scale(1.2);
-			}
-			100% {
-				transform: translate(0, 0) scale(1);
+		@keyframes spin {
+			to {
+				transform: translate(-50%, -50%) rotate(360deg);
 			}
 		}
 
-		@keyframes drift-4 {
-			0% {
-				transform: translate(0, 0) scale(1);
+		@keyframes rainbowGlow {
+			0%,
+			100% {
+				opacity: 0.8;
 			}
 			50% {
-				transform: translate(-1vw, -40vh) scale(0.6);
+				opacity: 1;
+			}
+		}
+
+		@keyframes drift {
+			from {
+				transform: translateX(0);
+			}
+			to {
+				transform: translateX(160vw);
+			}
+		}
+
+		@keyframes facetShift {
+			0% {
+				background-position: 0 0;
 			}
 			100% {
-				transform: translate(0, 0) scale(1);
+				background-position: 130px 65px;
+			}
+		}
+
+		/* glitch: mostly invisible, snapping into offset bands for a frame */
+		@keyframes glitchA {
+			0%,
+			8%,
+			100% {
+				opacity: 0;
+				clip-path: inset(0 0 100% 0);
+				transform: translateX(0);
+			}
+			9% {
+				opacity: 0.85;
+				clip-path: inset(12% 0 74% 0);
+				transform: translateX(-8px);
+			}
+			11% {
+				opacity: 0;
+			}
+			34% {
+				opacity: 0.7;
+				clip-path: inset(58% 0 28% 0);
+				transform: translateX(10px);
+			}
+			36% {
+				opacity: 0;
+			}
+			67% {
+				opacity: 0.8;
+				clip-path: inset(80% 0 6% 0);
+				transform: translateX(-6px);
+			}
+			69% {
+				opacity: 0;
+			}
+		}
+		@keyframes glitchB {
+			0%,
+			14%,
+			100% {
+				opacity: 0;
+				clip-path: inset(0 0 100% 0);
+				transform: translateX(0);
+			}
+			15% {
+				opacity: 0.7;
+				clip-path: inset(30% 0 52% 0);
+				transform: translateX(9px);
+			}
+			17% {
+				opacity: 0;
+			}
+			52% {
+				opacity: 0.75;
+				clip-path: inset(4% 0 82% 0);
+				transform: translateX(-11px);
+			}
+			54% {
+				opacity: 0;
+			}
+			88% {
+				opacity: 0.7;
+				clip-path: inset(66% 0 20% 0);
+				transform: translateX(7px);
+			}
+			90% {
+				opacity: 0;
+			}
+		}
+
+		@keyframes scanroll {
+			from {
+				background-position-y: 0;
+			}
+			to {
+				background-position-y: 100px;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.glitch,
+			.rays,
+			.cloud,
+			.scanlines,
+			.lowpoly,
+			.sun,
+			.rainbow {
+				animation: none;
 			}
 		}
 	</style>
-
-
 </html>
