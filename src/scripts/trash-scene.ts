@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const canvas = document.getElementById("trash-canvas") as HTMLCanvasElement | null;
 if (!canvas) throw new Error("trash-canvas not found");
@@ -76,6 +77,128 @@ function crumpledBottle(radius: number, height: number) {
 	);
 }
 
+// --- unhinged geometry: fuse + distort primitives into crazy shapes ---
+
+function matrixFrom(
+	pos: [number, number, number],
+	rot: [number, number, number],
+	scale: number | [number, number, number],
+) {
+	const s = typeof scale === "number" ? [scale, scale, scale] : scale;
+	return new THREE.Matrix4().compose(
+		new THREE.Vector3(...pos),
+		new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)),
+		new THREE.Vector3(...s),
+	);
+}
+
+function mergeParts(
+	parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[],
+) {
+	const geos = parts.map((p) => {
+		const g = p.geo.toNonIndexed();
+		if (p.matrix) g.applyMatrix4(p.matrix);
+		return g;
+	});
+	const merged = mergeGeometries(geos, false);
+	merged.computeVertexNormals();
+	return merged;
+}
+
+// spiky sea urchin — pull random vertices way out into spikes
+function spikeUrchin(radius: number) {
+	const geo = new THREE.IcosahedronGeometry(radius, 2);
+	const pos = geo.attributes.position;
+	const v = new THREE.Vector3();
+	for (let i = 0; i < pos.count; i++) {
+		v.fromBufferAttribute(pos, i);
+		const spike = Math.random() < 0.45 ? 1.4 + Math.random() * 1.3 : 1;
+		v.setLength(v.length() * spike);
+		pos.setXYZ(i, v.x, v.y, v.z);
+	}
+	geo.computeVertexNormals();
+	return geo;
+}
+
+// tangled torus knot
+function torusKnot(radius: number) {
+	const p = 2 + Math.floor(Math.random() * 3);
+	const q = 3 + Math.floor(Math.random() * 4);
+	return jitterGeometry(
+		new THREE.TorusKnotGeometry(radius, radius * 0.3, 100, 8, p, q),
+		radius * 0.06,
+	);
+}
+
+// gloopy metaball-ish cluster of fused spheres
+function blobCluster(radius: number) {
+	const count = 3 + Math.floor(Math.random() * 3);
+	const parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[] = [];
+	for (let i = 0; i < count; i++) {
+		const r = radius * (0.5 + Math.random() * 0.6);
+		parts.push({
+			geo: new THREE.IcosahedronGeometry(r, 1),
+			matrix: matrixFrom(
+				[
+					(Math.random() - 0.5) * radius * 1.6,
+					(Math.random() - 0.5) * radius * 1.6,
+					(Math.random() - 0.5) * radius * 1.6,
+				],
+				[0, 0, 0],
+				1,
+			),
+		});
+	}
+	return jitterGeometry(mergeParts(parts), radius * 0.14);
+}
+
+// jack / caltrop — perpendicular stretched spikes
+function jack(radius: number) {
+	const arm = () =>
+		new THREE.ConeGeometry(radius * 0.3, radius * 2.2, 5);
+	return mergeParts([
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, 0], 1) },
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [Math.PI, 0, 0], 1) },
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, Math.PI / 2], 1) },
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [0, 0, -Math.PI / 2], 1) },
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [Math.PI / 2, 0, 0], 1) },
+		{ geo: arm(), matrix: matrixFrom([0, 0, 0], [-Math.PI / 2, 0, 0], 1) },
+	]);
+}
+
+// frankenstein — fuse a few random primitives at random transforms
+function frankenstein(scale: number) {
+	const pool = [
+		() => new THREE.BoxGeometry(scale, scale, scale),
+		() => new THREE.ConeGeometry(scale * 0.6, scale * 1.6, 6),
+		() => new THREE.CylinderGeometry(scale * 0.4, scale * 0.6, scale * 1.4, 6),
+		() => new THREE.TetrahedronGeometry(scale * 0.9),
+		() => new THREE.TorusGeometry(scale * 0.7, scale * 0.28, 6, 10),
+		() => new THREE.IcosahedronGeometry(scale * 0.8, 0),
+	];
+	const count = 3 + Math.floor(Math.random() * 3);
+	const parts: { geo: THREE.BufferGeometry; matrix?: THREE.Matrix4 }[] = [];
+	for (let i = 0; i < count; i++) {
+		parts.push({
+			geo: pool[Math.floor(Math.random() * pool.length)](),
+			matrix: matrixFrom(
+				[
+					(Math.random() - 0.5) * scale * 1.4,
+					(Math.random() - 0.5) * scale * 1.4,
+					(Math.random() - 0.5) * scale * 1.4,
+				],
+				[
+					Math.random() * Math.PI,
+					Math.random() * Math.PI,
+					Math.random() * Math.PI,
+				],
+				0.7 + Math.random() * 0.8,
+			),
+		});
+	}
+	return jitterGeometry(mergeParts(parts), scale * 0.1);
+}
+
 // --- vivid palette + procedural "painted patch" textures for the PS1 look ---
 
 const vividPalette = [
@@ -130,10 +253,19 @@ type TrashPiece = {
 
 const pieces: TrashPiece[] = [];
 const builders = [
+	// the unhinged crew (weighted heavily)
+	() => spikeUrchin(0.7 + Math.random() * 0.5),
+	() => spikeUrchin(0.7 + Math.random() * 0.5),
+	() => torusKnot(0.5 + Math.random() * 0.4),
+	() => torusKnot(0.5 + Math.random() * 0.4),
+	() => blobCluster(0.6 + Math.random() * 0.4),
+	() => blobCluster(0.6 + Math.random() * 0.4),
+	() => jack(0.55 + Math.random() * 0.4),
+	() => frankenstein(0.6 + Math.random() * 0.5),
+	() => frankenstein(0.6 + Math.random() * 0.5),
+	// a little tame trash for contrast
 	() => crumpledBall(0.6 + Math.random() * 0.5),
 	() => crumpledCan(0.35 + Math.random() * 0.2, 1 + Math.random() * 0.6),
-	() => crumpledBox(0.6 + Math.random() * 0.5),
-	() => crumpledBottle(0.4 + Math.random() * 0.25, 1.3 + Math.random() * 0.7),
 ];
 
 const TRASH_COUNT = 22;
@@ -174,9 +306,9 @@ function spawnPiece(basePosition = randomBasePosition()) {
 		bobSpeed: 0.4 + Math.random() * 0.5,
 		bobOffset: Math.random() * Math.PI * 2,
 		rotSpeed: new THREE.Vector3(
-			(Math.random() - 0.5) * 0.3,
-			(Math.random() - 0.5) * 0.3,
-			(Math.random() - 0.5) * 0.3,
+			(Math.random() - 0.5) * 0.7,
+			(Math.random() - 0.5) * 0.7,
+			(Math.random() - 0.5) * 0.7,
 		),
 		driftSpeed: new THREE.Vector3(
 			(Math.random() - 0.5) * 0.05,
